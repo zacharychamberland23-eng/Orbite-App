@@ -57,6 +57,7 @@ td.mono { font-size: 12.5px; }
 .actrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .actrow .grow { flex: 1; min-width: 200px; }
 tr.cleared td { opacity: .45; }
+td small.unv { color: var(--suspect); max-width: none; }
 .pill.self { color: var(--r-lan); border-color: color-mix(in srgb, var(--r-lan) 45%, transparent); background: color-mix(in srgb, var(--r-lan) 10%, transparent); }
 
 /* panneau des parametres */

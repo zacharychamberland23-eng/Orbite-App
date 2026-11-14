@@ -58,8 +58,11 @@ def conn():
 def init():
     c = conn()
     c.executescript(SCHEMA)
-    if "cleared" not in {r[1] for r in c.execute("PRAGMA table_info(flags)")}:
+    fcols = {r[1] for r in c.execute("PRAGMA table_info(flags)")}
+    if "cleared" not in fcols:
         c.execute("ALTER TABLE flags ADD COLUMN cleared REAL")
+    if "verified" not in fcols:
+        c.execute("ALTER TABLE flags ADD COLUMN verified INTEGER DEFAULT 0")
     cols = {r[1] for r in c.execute("PRAGMA table_info(samples)")}
     for col in ("rx", "tx"):
         if col not in cols:

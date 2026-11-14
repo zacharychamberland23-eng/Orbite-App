@@ -588,7 +588,7 @@
       d.rows.forEach((f) => tb.append(h("tr", null,
         h("td", null, when(f.last_ts)), h("td", null, h("span", { class: "pill " + f.severity }, SEV_LABEL[f.severity])),
         ipCell(f.ip, f.banned ? "bannie par fail2ban" : f.host), h("td", null, f.kind),
-        h("td", { class: "wrap" }, f.detail), h("td", { class: "num" }, f.count),
+        detailCell(f), h("td", { class: "num" }, f.count),
         h("td", null, h("button", { class: "btn small", title: "Effacer toutes les alertes de cette adresse", on: { click: async () => { await act("/api/unflag", { ip: f.ip }); loadFlags(); loadLive(); loadRecent(); } } }, "Effacer")))));
       if (!d.rows.length) tb.append(h("tr", null, h("td", { colspan: 7, class: "empty" }, "Aucune alerte.")));
     } catch (e) {}
@@ -639,6 +639,11 @@
   }
 
   // ---------- fiche d'une adresse ----------
+  function detailCell(f) {
+    const td = h("td", { class: "wrap" }, f.detail);
+    if (f.verified === 0) td.append(h("small", { class: "unv", title: "Ces paquets n'ont pas fait de poignée de main TCP : leur adresse source peut être usurpée. Cette alerte ne déclenche jamais de bannissement automatique." }, "adresse source non vérifiée"));
+    return td;
+  }
   function kv(rows) {
     const dl = h("dl", { class: "kv" });
     rows.forEach((r) => { if (r && r[1] !== null && r[1] !== undefined && r[1] !== "") dl.append(h("dt", null, r[0]), h("dd", null, r[1])); });
@@ -751,7 +756,7 @@
     box.append(h("div", { class: "grid two", style: "margin-top:16px" },
       tableCard("Alertes", [["Dernière fois"], ["Gravité"], ["Type"], ["Détail"], ["Fois", "num"]],
         d.flags.map((f) => h("tr", { class: f.cleared ? "cleared" : null, title: f.cleared ? "Effacée le " + when(f.cleared) : null }, h("td", null, when(f.last_ts)), h("td", null, h("span", { class: "pill " + f.severity }, SEV_LABEL[f.severity])),
-          h("td", null, f.kind), h("td", { class: "wrap" }, f.detail), h("td", { class: "num" }, f.count))), "Aucune alerte pour cette adresse."),
+          h("td", null, f.kind), detailCell(f), h("td", { class: "num" }, f.count))), "Aucune alerte pour cette adresse."),
       tableCard("Historique des bans", [["Heure"], ["Action"], ["Source"]],
         d.events.map((b) => h("tr", null, h("td", null, when(b.ts)), h("td", null, h("span", { class: "pill " + (b.action === "unban" ? "info" : "high") }, BAN_LABEL[b.action] || b.action)),
           h("td", null, b.jail === "orbite" ? "Orbite" : "fail2ban · " + b.jail))), "Jamais bannie.")));
@@ -937,14 +942,14 @@
       toggle("flag_lan", "Analyser aussi le réseau local", "Par défaut, seules les adresses d'Internet sont analysées")));
 
     // liste blanche
-    const wl = listInput("whitelist", "Une adresse ou une plage par ligne, ex. 184.162.244.27 ou 192.168.2.0/24", 4);
+    const wl = listInput("whitelist", "Une adresse ou une plage par ligne, ex. 203.0.113.25 ou 192.168.1.0/24", 4);
     const me = S.system.your_ip;
     body.append(sec("Liste blanche", "Jamais signalées ni bannies, par Orbite ou automatiquement.", wl,
       me && !v.whitelist.includes(me) ? h("button", { type: "button", class: "btn small", on: { click: (e) => { draft.whitelist = [...draft.whitelist, me]; wl.value = draft.whitelist.join("\n"); e.target.remove(); dirty(); } } }, "Ajouter mon adresse (" + me + ")") : null));
 
     // mes adresses
     body.append(sec("Mes adresses publiques", "Ton IP publique et celles de tes autres lieux. Le trafic qui revient par la boucle NAT (tes appareils qui ouvrent tes propres domaines) s'affiche sur l'anneau du réseau local, sans jamais être signalé ni banni.",
-      listInput("own_ips", "ex. 70.28.41.211", 2)));
+      listInput("own_ips", "ex. 198.51.100.7", 2)));
 
     // collecte
     body.append(sec("Collecte et historique", null,

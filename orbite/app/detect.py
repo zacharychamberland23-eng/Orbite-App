@@ -43,6 +43,20 @@ _auth = defaultdict(deque)      # ip -> ts
 _last_prune = 0.0
 _status_cache = (0.0, {}, set())
 counter = {"flags": 0}
+VERIFIED = {}           # ip -> derniere poignee de main TCP complete vue (adresse source non falsifiable)
+
+
+def mark_verified(ip, now):
+    VERIFIED[ip] = now
+    if len(VERIFIED) > 50000:
+        lim = now - 86400
+        for k in [k for k, t in VERIFIED.items() if t < lim]:
+            del VERIFIED[k]
+
+
+def is_verified(ip, now=None):
+    t = VERIFIED.get(ip)
+    return bool(t and t > (now or time.time()) - 86400)
 
 
 _wl_cache = (-1, [])
@@ -122,7 +136,7 @@ def skip(ip):
     return not a.is_global and not settings.get("flag_lan")
 
 
-def add_flag(ip, kind, sev, detail, now=None):
+def add_flag(ip, kind, sev, detail, now=None, verified=True):
     now = now or time.time()
     detail = (detail or "")[:300]
     c = db.conn()
@@ -130,11 +144,11 @@ def add_flag(ip, kind, sev, detail, now=None):
                   (ip, kind, now - 600)).fetchall()
     r = r[0] if r else None
     if r:
-        c.execute("UPDATE flags SET last_ts=?, count=count+1, detail=?, sev=MAX(sev,?) WHERE id=?",
-                  (now, detail, SEV[sev], r["id"]))
+        c.execute("UPDATE flags SET last_ts=?, count=count+1, detail=?, sev=MAX(sev,?), verified=MAX(verified,?) WHERE id=?",
+                  (now, detail, SEV[sev], 1 if verified else 0, r["id"]))
     else:
-        c.execute("INSERT INTO flags(ts,last_ts,ip,kind,sev,detail,count) VALUES(?,?,?,?,?,?,1)",
-                  (now, now, ip, kind, SEV[sev], detail))
+        c.execute("INSERT INTO flags(ts,last_ts,ip,kind,sev,detail,count,verified) VALUES(?,?,?,?,?,?,1,?)",
+                  (now, now, ip, kind, SEV[sev], detail, 1 if verified else 0))
         counter["flags"] += 1
     c.commit()
     if getattr(_reentry, "on", False):
@@ -143,7 +157,7 @@ def add_flag(ip, kind, sev, detail, now=None):
     try:
         for hook in HOOKS:
             try:
-                hook(ip, kind, SEV[sev], now)
+                hook(ip, kind, SEV[sev], now, verified)
             except Exception as ex:
                 print("[detection] erreur de hook :", repr(ex), flush=True)
     finally:
@@ -159,6 +173,7 @@ def on_flow(ip, direction, lport, proto, replied, now):
     """Appele pour chaque nouvelle connexion vue par le collecteur."""
     if direction != "in" or skip(ip):
         return
+    v = is_verified(ip, now)
     with _lock:
         d = _ports[ip]
         d.append((now, lport))
@@ -166,33 +181,34 @@ def on_flow(ip, direction, lport, proto, replied, now):
         ports = sorted({p for _, p in d})
         if len(ports) >= settings.get("portscan_ports"):
             add_flag(ip, "Balayage de ports", "high",
-                     "%d ports en 5 min : %s" % (len(ports), ", ".join(map(str, ports[:15]))), now)
+                     "%d ports en 5 min : %s" % (len(ports), ", ".join(map(str, ports[:15]))), now, verified=v)
         n = _new[ip]
         n.append(now)
         _trim(n, now, 60)
         if len(n) >= settings.get("flood_per_min"):
-            add_flag(ip, "Rafale de connexions", "medium", "%d connexions en 1 min" % len(n), now)
+            add_flag(ip, "Rafale de connexions", "medium", "%d connexions en 1 min" % len(n), now, verified=v)
         if not replied:
             p = _probes[ip]
             p.append(now)
             _trim(p, now, 300)
             if len(p) >= settings.get("probes"):
                 add_flag(ip, "Sondes sans réponse", "medium",
-                         "%d tentatives sans réponse en 5 min" % len(p), now)
+                         "%d tentatives sans réponse en 5 min" % len(p), now, verified=v)
         if lport in SENSITIVE:
             if replied:
                 add_flag(ip, "Port sensible accessible", "high",
-                         "Le port %d (%s) a répondu à cette adresse" % (lport, SENSITIVE[lport]), now)
+                         "Le port %d (%s) a répondu à cette adresse" % (lport, SENSITIVE[lport]), now, verified=v)
             else:
                 add_flag(ip, "Sonde sur port sensible", "medium",
-                         "Tentative sur le port %d (%s)" % (lport, SENSITIVE[lport]), now)
+                         "Tentative sur le port %d (%s)" % (lport, SENSITIVE[lport]), now, verified=v)
         _prune(now)
 
 
 def on_reply(ip, lport, now):
+    v = is_verified(ip, now)
     if lport in SENSITIVE and not skip(ip):
         add_flag(ip, "Port sensible accessible", "high",
-                 "Le port %d (%s) a répondu à cette adresse" % (lport, SENSITIVE[lport]), now)
+                 "Le port %d (%s) a répondu à cette adresse" % (lport, SENSITIVE[lport]), now, verified=v)
 
 
 def on_http(ip, method, path, status, ua, now):

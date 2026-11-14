@@ -317,6 +317,8 @@ def tick(now=None):
         for n in found:
             key = (n["proto"], n["ip"], n["rport"], n["lport"])
             seen.add(key)
+            if n["direction"] == "in" and n["proto"] == "tcp" and n["state"] == "ESTABLISHED" and n["replied"]:
+                detect.mark_verified(n["ip"], now)  # poignee de main complete : l'adresse n'est pas usurpee
             opened = n["proto"] == "udp" or n["state"] in OPEN_TCP
             f = FLOWS.get(key)
             if f is None:

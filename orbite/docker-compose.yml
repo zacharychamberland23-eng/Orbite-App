@@ -16,8 +16,9 @@ services:
       - ./data:/data
       - /var/log:/host/log:ro
       - /etc/localtime:/etc/localtime:ro
-      # Sert seulement a lire le nom des conteneurs. Retire cette ligne si tu preferes :
-      # les conteneurs apparaitront alors par adresse IP.
+      # Sert a lire le nom des conteneurs. Attention : meme en « :ro », ce socket donne le controle
+      # complet de Docker. Retire cette ligne si tu preferes : les conteneurs apparaitront par IP.
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Permet de debannir de fail2ban depuis l'app. Retire cette ligne pour l'empecher.
+      # Permet de debannir de fail2ban depuis l'app (ce socket donne aussi le controle de fail2ban).
+      # Retire cette ligne pour l'empecher : la fiche affichera alors la commande a lancer.
       - /var/run/fail2ban:/var/run/fail2ban

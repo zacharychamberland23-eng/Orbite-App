@@ -1,6 +1,7 @@
-"""Blocage reel des adresses : une table nftables propre a Orbite, placee avant le suivi de
-connexions. Elle bloque l'hote et les conteneurs, sur tous les ports, sans toucher a ufw,
-a Docker ni a fail2ban."""
+"""Blocage reel des adresses : une table nftables propre a Orbite, placee juste apres le suivi
+de connexions et avant la redirection de Docker. Elle refuse toute nouvelle connexion entrante
+d'une adresse bannie, vers l'hote et les conteneurs, sur tous les ports, sans toucher a ufw, a
+Docker ni a fail2ban. Les connexions que le serveur ouvre lui-meme restent permises."""
 import ipaddress
 import os
 import queue
@@ -28,17 +29,10 @@ delete table inet orbite
 table inet orbite {
   set ban4 { type ipv4_addr; flags timeout; }
   set ban6 { type ipv6_addr; flags timeout; }
-  chain orbite_pre { type filter hook prerouting priority -350; policy accept;
+  chain orbite_pre { type filter hook prerouting priority -150; policy accept;
+    ct state established,related accept
     ip saddr @ban4 counter drop
     ip6 saddr @ban6 counter drop
-  }
-  chain orbite_fwd { type filter hook forward priority -350; policy accept;
-    ip daddr @ban4 counter drop
-    ip6 daddr @ban6 counter drop
-  }
-  chain orbite_out { type filter hook output priority -350; policy accept;
-    ip daddr @ban4 counter drop
-    ip6 daddr @ban6 counter drop
   }
 }
 """
@@ -180,9 +174,12 @@ def is_admin(ip):
     return False
 
 
-def consider(ip, kind, sev, now):
-    """Appele apres chaque signalement. Le travail se fait dans un fil separe."""
-    if kind in SELF_KINDS or settings.get("autoban_mode") == "off" or sev < 2:
+def consider(ip, kind, sev, now, verified=True):
+    """Appele apres chaque signalement. Le travail se fait dans un fil separe.
+    Une alerte basee sur des paquets dont l'adresse source peut etre falsifiee (SYN ou UDP sans
+    poignee de main) ne declenche jamais de bannissement : sinon, n'importe qui pourrait faire
+    bannir une adresse innocente en usurpant son IP."""
+    if kind in SELF_KINDS or settings.get("autoban_mode") == "off" or sev < 2 or not verified:
         return
     if ip in _applied or ip in _pending:
         return
@@ -198,7 +195,8 @@ def _points(ip, now):
     medium = settings.get("autoban_include_medium")
     pts = 0
     marks = ",".join("?" * len(SELF_KINDS))
-    for r in db.q("SELECT sev, count FROM flags WHERE ip=? AND last_ts>? AND cleared IS NULL AND kind NOT IN (%s)" % marks,
+    for r in db.q("SELECT sev, count FROM flags WHERE ip=? AND last_ts>? AND cleared IS NULL AND verified=1 "
+                  "AND kind NOT IN (%s)" % marks,
                   (ip, win) + tuple(SELF_KINDS)):
         w = 3 if r["sev"] >= 3 else (1 if r["sev"] == 2 and medium else 0)
         pts += w * min(r["count"] or 1, 5)

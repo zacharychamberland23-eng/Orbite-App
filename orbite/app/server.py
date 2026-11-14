@@ -1,5 +1,6 @@
 """Orbite : serveur web, connexion par mot de passe et API."""
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -49,9 +50,12 @@ class Handler(BaseHTTPRequestHandler):
     def client_ip(self):
         peer = self.client_address[0]
         if peer in ("127.0.0.1", "::1"):
-            fwd = self.headers.get("X-Real-IP") or (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-            if fwd:
-                return fwd
+            # Seul X-Real-IP, ecrit par nginx, est fiable. X-Forwarded-For peut etre forge par le client.
+            real = (self.headers.get("X-Real-IP") or "").strip()
+            try:
+                return str(ipaddress.ip_address(real))
+            except ValueError:
+                pass
         return peer
 
     def send(self, code, body=b"", ctype="application/json; charset=utf-8", extra=None):
@@ -67,7 +71,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-                         "frame-ancestors 'none'")
+                         "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if ctype.startswith("application/json"):
             self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
@@ -119,8 +126,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path.startswith("/static/"):
                 return self.static(u.path[8:])
             if u.path == "/api/me":
-                return self.send(200, {"auth": self.authed(), "user": USER if self.authed() else None,
-                                       "host": socket.gethostname()})
+                ok = self.authed()
+                return self.send(200, {"auth": ok, "user": USER if ok else None, "host": socket.gethostname() if ok else ""})
             if not u.path.startswith("/api/"):
                 return self.send(404, {"error": "introuvable"})
             if not self.authed():
@@ -145,6 +152,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            return self.send(411, {"error": "longueur requise"})
         data = self.body_json()  # toujours lire le corps pour garder la connexion saine
         if "application/json" not in (self.headers.get("Content-Type") or ""):
             return self.send(415, {"error": "format non pris en charge"})
@@ -276,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
         ip = self.client_ip()
         now = time.time()
         with _lock:
+            if len(FAILS) > 5000:
+                for k in [k for k, d in FAILS.items() if not d or d[-1] < now - 900]:
+                    del FAILS[k]
             f = FAILS[ip]
             while f and f[0] < now - 900:
                 f.popleft()
@@ -289,7 +302,7 @@ class Handler(BaseHTTPRequestHandler):
                 FAILS[ip].append(now)
                 n = len(FAILS[ip])
             try:
-                detect.add_flag(ip, "Échec de connexion à Orbite", "high" if n >= 3 else "medium",
+                detect.add_flag(ip, "Échec de connexion à Orbite", "high" if n >= 5 else "medium",
                                 "%d essai(s) raté(s) sur la page de connexion" % n, now)
             except Exception:
                 pass
