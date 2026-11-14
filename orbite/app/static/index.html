@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Orbite</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+
+<div id="login" class="login" hidden>
+  <form id="login-form" class="card login-card" autocomplete="on">
+    <div class="brand big"><span class="logo"></span>Orbite</div>
+    <p class="muted">Connecte-toi pour voir les connexions du serveur.</p>
+    <label>Utilisateur<input id="l-user" name="username" autocomplete="username" required></label>
+    <label>Mot de passe<input id="l-pass" name="password" type="password" autocomplete="current-password" required></label>
+    <div id="l-err" class="err" hidden></div>
+    <button class="btn primary" type="submit">Se connecter</button>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <a href="#/" id="home" class="brand" title="Retour à la vue d'ensemble"><span class="logo"></span>Orbite <span id="host" class="host"></span></a>
+    <nav id="tabs" class="tabs">
+      <button data-tab="overview" class="on">Vue d'ensemble</button>
+      <button data-tab="connections">Connexions</button>
+      <button data-tab="alerts">Alertes <span id="badge-alerts" class="badge" hidden></span></button>
+      <button data-tab="bans">Bannissements</button>
+    </nav>
+    <div class="actions">
+      <span id="pulse" class="pulse" title="Collecte"></span>
+      <button id="open-settings" class="btn" aria-controls="settings">Paramètres</button>
+      <button id="theme" class="btn icon" title="Basculer entre le thème sombre et le thème clair">Thème</button>
+      <button id="logout" class="btn">Déconnexion</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-overview">
+      <div id="warn" class="notice" hidden></div>
+      <div class="grid hero">
+        <div class="card planet-card">
+          <canvas id="planet"></canvas>
+          <div id="hud" class="hud"></div>
+          <div class="legend">
+            <span><i class="ring in"></i>entrantes</span>
+            <span><i class="ring out"></i>sortantes</span>
+            <span><i class="ring lan"></i>réseau local</span>
+            <span><i class="ring sus"></i>suspects</span>
+            <span class="gap"></span>
+            <span><i class="mk"></i>normal</span>
+            <span><i class="mk bot"></i>robot</span>
+            <span><i class="mk banned"></i>banni</span>
+          </div>
+          <div id="hudstats" class="hudstats"></div>
+          <div id="tip" class="tip" hidden></div>
+        </div>
+        <div class="side">
+          <div class="card">
+            <h3>Alertes récentes</h3>
+            <div id="recent-alerts" class="list"></div>
+          </div>
+          <div class="card">
+            <h3>Applications les plus actives</h3>
+            <div id="top-apps" class="list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bar">
+        <h2>Historique</h2>
+        <select id="range" aria-label="Période">
+          <option value="1h">1 heure</option>
+          <option value="12h">12 heures</option>
+          <option value="24h">24 heures</option>
+          <option value="7d">7 jours</option>
+          <option value="30d">30 jours</option>
+        </select>
+      </div>
+      <div class="grid charts">
+        <div class="card"><h3>Connexions actives</h3><p class="sub">Moyenne des connexions ouvertes</p><div class="chart" id="c-active"></div></div>
+        <div class="card"><h3>Clients uniques</h3><p class="sub">Adresses IP distinctes connectées</p><div class="chart" id="c-ips"></div></div>
+        <div class="card"><h3>Nouvelles connexions</h3><p class="sub">Entrantes et sortantes par intervalle</p><div class="chart" id="c-new"></div></div>
+        <div class="card"><h3>Latence moyenne</h3><p class="sub">Aller-retour TCP mesuré par le noyau</p><div class="chart" id="c-rtt"></div></div>
+        <div class="card"><h3>Débit réseau</h3><p class="sub">Entrant et sortant sur les cartes réseau du serveur</p><div class="chart" id="c-rate"></div></div>
+        <div class="card"><h3>Requêtes HTTP</h3><p class="sub">Lignes du journal d'accès nginx</p><div class="chart" id="c-http"></div></div>
+        <div class="card"><h3>Alertes et bannissements</h3><p class="sub">Nouveaux signalements et bans fail2ban</p><div class="chart" id="c-flags"></div></div>
+      </div>
+    </section>
+
+    <section id="tab-connections" hidden>
+      <div class="bar">
+        <h2>Connexions</h2>
+        <div class="filters">
+          <input id="f-q" type="search" placeholder="IP, application ou port">
+          <select id="f-active"><option value="1">En cours</option><option value="0">Historique complet</option></select>
+          <select id="f-dir"><option value="">Tous les sens</option><option value="in">Entrantes</option><option value="out">Sortantes</option></select>
+          <select id="f-scope"><option value="">Internet et réseau local</option><option value="wan">Internet</option><option value="lan">Réseau local</option></select>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="table-wrap"><table id="t-conn"><thead><tr>
+          <th></th><th>Adresse</th><th>Sens</th><th>Application</th><th class="num">Port local</th><th class="num">Port distant</th>
+          <th>Proto</th><th class="num">Latence</th><th class="num">Données</th><th>Début</th><th class="num">Durée</th>
+        </tr></thead><tbody></tbody></table></div>
+        <div class="foot"><span id="conn-count" class="muted"></span><button id="conn-more" class="btn" hidden>Charger plus</button></div>
+      </div>
+    </section>
+
+    <section id="tab-alerts" hidden>
+      <div class="bar">
+        <h2>Alertes</h2>
+        <div class="filters">
+          <input id="a-q" type="search" placeholder="IP, type ou détail">
+          <select id="a-min"><option value="2">Suspects seulement</option><option value="0">Tout, robots compris</option><option value="3">Graves seulement</option></select>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="table-wrap"><table id="t-flags"><thead><tr>
+          <th>Dernière fois</th><th>Gravité</th><th>Adresse</th><th>Type</th><th>Détail</th><th class="num">Fois</th><th></th>
+        </tr></thead><tbody></tbody></table></div>
+      </div>
+    </section>
+
+    <section id="tab-bans" hidden>
+      <div class="bar"><h2>Bannissements</h2></div>
+      <div id="bans-warn" class="notice" hidden></div>
+      <div class="grid stats">
+        <div class="card stat"><span class="k">Bannies en ce moment</span><span class="v" id="b-current">0</span></div>
+        <div class="card stat"><span class="k">Bans depuis 24 h</span><span class="v" id="b-24h">0</span></div>
+        <div class="card stat"><span class="k">Sources</span><span class="v small" id="b-jails">—</span></div>
+      </div>
+      <form id="ban-form" class="card banform">
+        <h3>Bannir une adresse</h3>
+        <div class="filters">
+          <input id="ban-ip" placeholder="Adresse IP" required autocomplete="off">
+          <select id="ban-dur"></select>
+          <input id="ban-reason" placeholder="Raison (facultatif)" maxlength="120">
+          <button class="btn danger" type="submit">Bannir</button>
+        </div>
+        <div id="ban-err" class="err" hidden></div>
+      </form>
+      <div id="bans-err" class="err" hidden style="margin-bottom:12px"></div>
+      <div class="grid">
+        <div class="card table-card"><h3 class="pad">Adresses bannies</h3>
+          <div class="table-wrap"><table id="t-banned"><thead><tr><th>Adresse</th><th>Source</th><th>Depuis</th><th>Expire</th><th>Blocage complet</th><th></th></tr></thead><tbody></tbody></table></div>
+        </div>
+        <div class="card table-card"><h3 class="pad">Journal des actions</h3>
+          <div class="table-wrap"><table id="t-bans"><thead><tr><th>Heure</th><th>Action</th><th>Adresse</th><th>Source</th></tr></thead><tbody></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-ip" hidden></section>
+  </main>
+  <div id="panel-shade" class="shade"></div>
+  <aside id="settings" class="panel" aria-hidden="true" aria-label="Paramètres">
+    <div class="phead"><h3>Paramètres</h3><button id="close-settings" class="btn icon" title="Fermer" aria-label="Fermer les paramètres">✕</button></div>
+    <div id="ps-body" class="pbody"></div>
+    <div id="ps-foot" class="pfoot" hidden></div>
+  </aside>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+services:
+  orbite:
+    build: .
+    container_name: orbite
+    restart: unless-stopped
+    # Le mode host et pid: host servent a voir les connexions et les programmes de l'hote.
+    network_mode: host
+    pid: host
+    cap_add:
+      - NET_ADMIN      # lire la table conntrack
+      - SYS_PTRACE     # lire le nom des programmes
+    security_opt:
+      - apparmor:unconfined
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - /var/log:/host/log:ro
+      - /etc/localtime:/etc/localtime:ro
+      # Sert seulement a lire le nom des conteneurs. Retire cette ligne si tu preferes :
+      # les conteneurs apparaitront alors par adresse IP.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Permet de debannir de fail2ban depuis l'app. Retire cette ligne pour l'empecher.
+      - /var/run/fail2ban:/var/run/fail2ban
