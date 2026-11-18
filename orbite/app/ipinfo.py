@@ -56,10 +56,15 @@ def _rdap(ip):
 
 
 def _geo(ip):
-    fields = "status,message,country,countryCode,regionName,city,isp,org,as,asname,mobile,proxy,hosting"
+    fields = "status,message,country,countryCode,regionName,city,lat,lon,isp,org,as,asname,mobile,proxy,hosting"
     d = _fetch("http://ip-api.com/json/%s?fields=%s&lang=fr" % (urllib.parse.quote(ip), fields))
     if d.get("status") != "success":
         raise ValueError(d.get("message") or "échec")
+    try:
+        import geo
+        geo.remember(ip, d.get("lat"), d.get("lon"), d.get("countryCode"), d.get("city"))
+    except Exception:
+        pass
     return {k: d.get(k) for k in ("country", "countryCode", "regionName", "city", "isp", "org", "as", "asname",
                                   "mobile", "proxy", "hosting")}
 

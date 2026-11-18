@@ -96,6 +96,22 @@ def forget(ip):
             store.pop(ip, None)
 
 
+def clear_all(now=None):
+    n = db.conn().execute("UPDATE flags SET cleared=? WHERE cleared IS NULL", (now or time.time(),)).rowcount
+    db.conn().commit()
+    with _lock:
+        for store in (_ports, _new, _probes, _http_err, _auth):
+            store.clear()
+    reset_cache()
+    return n
+
+
+def mark_seen(now=None):
+    n = db.conn().execute("UPDATE flags SET seen=? WHERE seen IS NULL", (now or time.time(),)).rowcount
+    db.conn().commit()
+    return n
+
+
 def clear_flags(ip, now=None):
     n = db.conn().execute("UPDATE flags SET cleared=? WHERE ip=? AND cleared IS NULL", (now or time.time(), ip)).rowcount
     db.conn().commit()
@@ -144,8 +160,9 @@ def add_flag(ip, kind, sev, detail, now=None, verified=True):
                   (ip, kind, now - 600)).fetchall()
     r = r[0] if r else None
     if r:
-        c.execute("UPDATE flags SET last_ts=?, count=count+1, detail=?, sev=MAX(sev,?), verified=MAX(verified,?) WHERE id=?",
-                  (now, detail, SEV[sev], 1 if verified else 0, r["id"]))
+        c.execute("UPDATE flags SET last_ts=?, count=count+1, detail=?, seen=CASE WHEN ?>sev THEN NULL ELSE seen END, "
+                  "sev=MAX(sev,?), verified=MAX(verified,?) WHERE id=?",
+                  (now, detail, SEV[sev], SEV[sev], 1 if verified else 0, r["id"]))
     else:
         c.execute("INSERT INTO flags(ts,last_ts,ip,kind,sev,detail,count,verified) VALUES(?,?,?,?,?,?,1,?)",
                   (now, now, ip, kind, SEV[sev], detail, 1 if verified else 0))

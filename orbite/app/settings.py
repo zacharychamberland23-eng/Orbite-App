@@ -57,6 +57,7 @@ SPEC = {
     "retention_days": ("int", int(_env("ORBITE_RETENTION_DAYS", "30")), 1, 365),
     "rdns": ("bool", _bool("ORBITE_RDNS", True), None, None),
     "lookup": ("bool", _bool("ORBITE_LOOKUP", True), None, None),
+    "geo_points": ("bool", _bool("ORBITE_GEO_POINTS", True), None, None),
     "enforce_f2b": ("bool", _bool("ORBITE_ENFORCE_F2B", True), None, None),
 }
 
@@ -162,20 +163,33 @@ def reset():
 
 # ---------- mot de passe ----------
 
-def _hash(password, salt=None):
+ITERATIONS = 600000  # recommandation OWASP pour PBKDF2-SHA256
+
+
+def _hash(password, salt=None, rounds=ITERATIONS):
     salt = salt or secrets.token_hex(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200000)
-    return "pbkdf2$%s$%s" % (salt, dk.hex())
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), rounds)
+    return "pbkdf2$%d$%s$%s" % (rounds, salt, dk.hex())
 
 
 def check_password(given, env_password):
     stored = db.kv_get("password_hash")
     if stored:
+        parts = stored.split("$")
         try:
-            _, salt, _ = stored.split("$")
+            if len(parts) == 3:      # ancien format (200 000 tours), mis a jour apres une connexion reussie
+                _, salt, digest = parts
+                rounds = 200000
+            else:
+                _, rounds, salt, digest = parts
+                rounds = int(rounds)
+            dk = hashlib.pbkdf2_hmac("sha256", given.encode(), bytes.fromhex(salt), rounds).hex()
         except ValueError:
             return False
-        return hmac.compare_digest(_hash(given, salt), stored)
+        ok = hmac.compare_digest(dk, digest)
+        if ok and rounds < ITERATIONS:
+            set_password(given)
+        return ok
     return hmac.compare_digest(given.encode(), env_password.encode())
 
 

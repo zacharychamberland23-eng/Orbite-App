@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS http (id INTEGER PRIMARY KEY, ts REAL, ip TEXT, metho
 CREATE INDEX IF NOT EXISTS ix_http_ip ON http(ip, ts);
 CREATE INDEX IF NOT EXISTS ix_http_ts ON http(ts);
 CREATE TABLE IF NOT EXISTS ipinfo (ip TEXT PRIMARY KEY, ts REAL, data TEXT);
+CREATE TABLE IF NOT EXISTS geo (ip TEXT PRIMARY KEY, ts REAL, lat REAL, lon REAL, cc TEXT, city TEXT);
 """
 
 
@@ -63,6 +64,8 @@ def init():
         c.execute("ALTER TABLE flags ADD COLUMN cleared REAL")
     if "verified" not in fcols:
         c.execute("ALTER TABLE flags ADD COLUMN verified INTEGER DEFAULT 0")
+    if "seen" not in fcols:
+        c.execute("ALTER TABLE flags ADD COLUMN seen REAL")
     cols = {r[1] for r in c.execute("PRAGMA table_info(samples)")}
     for col in ("rx", "tx"):
         if col not in cols:
@@ -101,4 +104,5 @@ def purge(days):
     c.execute("DELETE FROM samples WHERE ts<?", (lim,))
     c.execute("DELETE FROM http WHERE ts<?", (time.time() - min(days, 7) * 86400,))
     c.execute("DELETE FROM ipinfo WHERE ts<?", (lim,))
+    c.execute("DELETE FROM geo WHERE ts<?", (time.time() - 30 * 86400,))
     c.commit()

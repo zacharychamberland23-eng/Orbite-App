@@ -2,6 +2,7 @@
 import hmac
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import secrets
@@ -18,6 +19,7 @@ import db
 import detect
 import f2b
 import firewall
+import geo
 import ipinfo
 import logs
 import settings
@@ -136,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
             route = {"/api/live": self.api_live, "/api/connections": self.api_connections,
                      "/api/flags": self.api_flags, "/api/bans": self.api_bans,
                      "/api/series": self.api_series, "/api/status": self.api_status,
-                     "/api/ip": self.api_ip, "/api/ipinfo": self.api_ipinfo,
+                     "/api/ip": self.api_ip, "/api/ipinfo": self.api_ipinfo, "/api/place": self.api_place,
                      "/api/settings": self.api_settings}.get(u.path)
             if not route:
                 return self.send(404, {"error": "introuvable"})
@@ -187,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
                 if a is None:
                     return self.send(400, {"error": "Adresse IP invalide."})
                 return self.send(200, {"ok": True, "cleared": detect.clear_flags(str(a))})
+            if u.path == "/api/flags/seen":
+                return self.send(200, {"ok": True, "n": detect.mark_seen()})
+            if u.path == "/api/flags/clear":
+                return self.send(200, {"ok": True, "n": detect.clear_all()})
             if u.path == "/api/flag":
                 return self.api_flag(data)
             if u.path == "/api/trust":
@@ -340,6 +346,8 @@ class Handler(BaseHTTPRequestHandler):
         order = {"banned": 0, "suspect": 1, "bot": 2, "ok": 3, "self": 4}
         nodes.sort(key=lambda n: (order[n["status"]], -n["conns"]))
         stats["flags24h"] = db.q("SELECT COUNT(*) AS n FROM flags WHERE last_ts>? AND sev>=2 AND cleared IS NULL", (now - 86400,))[0]["n"]
+        stats["unseen"] = db.q("SELECT COUNT(*) AS n FROM flags WHERE last_ts>? AND sev>=2 AND cleared IS NULL "
+                               "AND seen IS NULL", (now - 86400,))[0]["n"]
         stats["banned"] = len(banned)
         last = db.q("SELECT http FROM samples ORDER BY ts DESC LIMIT 1")
         stats["http_rpm"] = last[0]["http"] if last else 0
@@ -350,7 +358,21 @@ class Handler(BaseHTTPRequestHandler):
             for a in n["apps"]:
                 apps[a] += n["conns"] if len(n["apps"]) == 1 else 1
         top = sorted(apps.items(), key=lambda kv: -kv[1])[:8]
-        return {"stats": stats, "nodes": nodes[:400], "total_nodes": len(nodes),
+        shown = nodes[:400]
+        locs = {}
+        if geo.enabled():
+            geo.want([n["ip"] for n in shown] + settings.get("own_ips"))
+            for n in shown:
+                g = geo.get(n["ip"])
+                if g:
+                    locs[n["ip"]] = g
+        home = None
+        for own in settings.get("own_ips"):
+            g = geo.get(own.split("/")[0]) if geo.enabled() else None
+            if g:
+                home = g
+                break
+        return {"stats": stats, "nodes": shown, "total_nodes": len(nodes), "geo": locs, "home": home,
                 "apps": [{"app": a, "conns": c} for a, c in top], "ts": now}
 
     def api_connections(self, qs):
@@ -395,6 +417,8 @@ class Handler(BaseHTTPRequestHandler):
         where, args = ["1=1"], []
         if qs.get("cleared") != "1":
             where.append("cleared IS NULL")
+        if qs.get("unseen") == "1":
+            where.append("seen IS NULL")
         if (qs.get("min") or "").isdigit():
             where.append("sev>=?")
             args.append(int(qs["min"]))
@@ -520,6 +544,39 @@ class Handler(BaseHTTPRequestHandler):
                 "events": events, "lookup": settings.get("lookup"), "firewall": firewall.STATE["ok"]}
 
 
+    def api_place(self, qs):
+        """Adresses vues dans une case de 0,5 degre autour d'un point de la Terre (meme decoupage que la carte)."""
+        try:
+            lat, lon = float(qs.get("lat", "")), float(qs.get("lon", ""))
+        except ValueError:
+            return {"error": "Coordonnées invalides."}
+        if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+            return {"error": "Coordonnées invalides."}
+        cell = lambda v: math.floor(v * 2 + 0.5) / 2
+        cl, co = cell(lat), cell(lon)
+        ips = [ip for ip, g in list(geo.CACHE.items()) if g and cell(g[0]) == cl and cell(g[1]) == co][:300]
+        st, _ = detect.status_map()
+        with collector.LOCK:
+            live = {}
+            for f in collector.FLOWS.values():
+                if f["ip"] in ips and collector.is_live(f):
+                    live[f["ip"]] = live.get(f["ip"], 0) + 1
+        rows, city, cc = [], "", ""
+        for ip in ips:
+            g = geo.CACHE.get(ip)
+            city, cc = city or g[3], cc or g[2]
+            s = db.q("SELECT COUNT(*) AS total, MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(bytes) AS bytes, "
+                     "SUM(direction='in') AS n_in, SUM(direction='out') AS n_out FROM connections WHERE ip=?", (ip,))[0]
+            nf = db.q("SELECT COUNT(*) AS n FROM flags WHERE ip=? AND cleared=0", (ip,))[0]["n"]
+            if not s["total"] and not live.get(ip) and not nf:
+                continue
+            apps = [r["app"] for r in db.q("SELECT app, COUNT(*) AS n FROM connections WHERE ip=? GROUP BY app ORDER BY n DESC LIMIT 3", (ip,)) if r["app"]]
+            rows.append({"ip": ip, "status": "self" if detect.is_own(ip) else st.get(ip, "ok"), "host": collector.RDNS_CACHE.get(ip) or "",
+                         "city": g[3], "active": live.get(ip, 0), "flags": nf, "apps": apps, **s})
+        rows.sort(key=lambda r: (-(r["active"] or 0), -(r["last"] or 0)))
+        return {"lat": cl, "lon": co, "city": city, "cc": cc, "ips": rows}
+
+
 def _rdns(ip):
     try:
         return socket.gethostbyaddr(ip)[0]
@@ -537,7 +594,16 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
+    os.umask(0o077)  # base, journaux WAL et fichiers crees : lisibles par root seulement
     db.init()
+    base = os.path.dirname(db.DB_PATH) or "."
+    try:
+        os.chmod(base, 0o700)
+        for f in os.listdir(base):
+            if f.startswith(os.path.basename(db.DB_PATH)):
+                os.chmod(os.path.join(base, f), 0o600)
+    except OSError:
+        pass
     settings.load()
     weak = len(PASSWORD) < 8 or PASSWORD.lower() in ("changeme", "change-moi", "motdepasse", "password")
     if weak and not settings.password_from_app():
@@ -546,6 +612,7 @@ def main():
     collector.start()
     logs.start()
     firewall.start()
+    geo.start()
     srv = Server((BIND, PORT), Handler)
     print("Orbite écoute sur http://%s:%d" % (BIND, PORT), flush=True)
     srv.serve_forever()

@@ -61,7 +61,7 @@
         </div>
         <div class="side">
           <div class="card">
-            <h3>Alertes récentes</h3>
+            <div class="cardhead"><h3>Nouvelles alertes</h3><button id="seen-recent" class="btn small" hidden title="Elles restent consultables dans l'onglet Alertes">Marquer comme vues</button></div>
             <div id="recent-alerts" class="list"></div>
           </div>
           <div class="card">
@@ -116,6 +116,8 @@
         <h2>Alertes</h2>
         <div class="filters">
           <input id="a-q" type="search" placeholder="IP, type ou détail">
+          <button id="seen-all" class="btn" title="Plus de notification pour ces alertes ; elles restent dans la liste">Tout marquer comme vu</button>
+          <button id="clear-all" class="btn" title="Efface toutes les alertes : les adresses redeviennent normales. L'historique est gardé.">Tout effacer</button>
           <select id="a-min"><option value="2">Suspects seulement</option><option value="0">Tout, robots compris</option><option value="3">Graves seulement</option></select>
         </div>
       </div>
@@ -156,6 +158,7 @@
     </section>
 
     <section id="tab-ip" hidden></section>
+    <section id="tab-place" hidden></section>
   </main>
   <div id="panel-shade" class="shade"></div>
   <aside id="settings" class="panel" aria-hidden="true" aria-label="Paramètres">
@@ -165,6 +168,7 @@
   </aside>
 </div>
 
+<script src="/static/earth.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

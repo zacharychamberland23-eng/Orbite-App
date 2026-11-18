@@ -57,6 +57,8 @@ td.mono { font-size: 12.5px; }
 .actrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .actrow .grow { flex: 1; min-width: 200px; }
 tr.cleared td { opacity: .45; }
+.newtag { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 600; color: var(--hud); }
+.cardhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 td small.unv { color: var(--suspect); max-width: none; }
 .pill.self { color: var(--r-lan); border-color: color-mix(in srgb, var(--r-lan) 45%, transparent); background: color-mix(in srgb, var(--r-lan) 10%, transparent); }
 
@@ -149,7 +151,8 @@ section > .bar:first-child { margin-top: 4px; }
 
 /* planete */
 .planet-card { position: relative; padding: 0; overflow: hidden; min-height: 540px; background: var(--space); }
-#planet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#planet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; }
+.globe-grab { position: absolute; border-radius: 50%; touch-action: none; z-index: 1; }
 .hud { position: absolute; top: 22px; left: 26px; pointer-events: none; color: var(--text); line-height: 1.15; }
 .hud .who { font-size: 19px; } .hud .who b { color: var(--hud); }
 .hud .big { color: var(--hud); font-size: 64px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
@@ -233,3 +236,17 @@ td small { color: var(--muted); display: block; max-width: 260px; overflow: hidd
   .planet-card { min-height: 540px; }
   .hudstats { padding: 10px 16px 12px; gap: 6px 18px; } .hudstats b { font-size: 16px; }
 }
+
+/* zoom de la Terre : curseur vertical semi-transparent */
+.zoombar { position: absolute; z-index: 4; right: 16px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 8px 6px; border-radius: 14px; background: color-mix(in srgb, var(--card) 38%, transparent); border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); opacity: .55; transition: opacity .2s; }
+.zoombar:hover, .zoombar:focus-within { opacity: 1; }
+.zoombar button { width: 26px; height: 26px; border-radius: 8px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
+.zoombar button:hover { background: color-mix(in srgb, var(--text) 12%, transparent); }
+.zoombar .zl { font-size: 10.5px; width: auto; padding: 0 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.zoombar input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 18px; height: 120px; margin: 0; accent-color: var(--hud); background: transparent; cursor: pointer; }
+.tip .tiphint { color: var(--muted); font-size: 11px; margin-top: 5px; border-top: 1px solid var(--border); padding-top: 5px; }
+tr.link { cursor: pointer; }
+.stat .v.hot { color: var(--hud); }
+@media (max-width: 700px) { .zoombar { right: 8px; top: auto; bottom: 86px; transform: none; } .zoombar input[type=range] { height: 80px; } }

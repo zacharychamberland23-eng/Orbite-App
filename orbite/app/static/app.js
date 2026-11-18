@@ -96,7 +96,7 @@
   $("#logout").addEventListener("click", async () => { try { await post("/api/logout"); } catch (e) {} showLogin(); });
 
   // ---------- navigation (le bouton Retour du navigateur suit les sections) ----------
-  const ROUTES = { "": "overview", connexions: "connections", alertes: "alerts", bans: "bans", ip: "ip" };
+  const ROUTES = { "": "overview", connexions: "connections", alertes: "alerts", bans: "bans", ip: "ip", lieu: "place" };
   const PATHS = { overview: "#/", connections: "#/connexions", alerts: "#/alertes", bans: "#/bans" };
   function nav(hash) {
     if (location.hash === hash) route(); else location.hash = hash;
@@ -112,19 +112,21 @@
       $("#f-scope").value = ["wan", "lan"].includes(p.get("scope")) ? p.get("scope") : "";
     }
     if (name === "ip") { try { currentIp = decodeURIComponent(parts[1] || ""); } catch (e) { currentIp = ""; } }
+    if (name === "place") currentPlace = { lat: p.get("lat") || "", lon: p.get("lon") || "" };
     setTab(name);
   }
   window.addEventListener("hashchange", route);
   function setTab(name) {
     tab = name;
     document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
-    ["overview", "connections", "alerts", "bans", "ip"].forEach((t) => { $("#tab-" + t).hidden = t !== name; });
+    ["overview", "connections", "alerts", "bans", "ip", "place"].forEach((t) => { $("#tab-" + t).hidden = t !== name; });
     window.scrollTo(0, 0);
     if (name === "overview") { planet.resize(); drawCharts(); }
     if (name === "connections") loadConnections(true);
     if (name === "alerts") loadFlags();
     if (name === "bans") loadBans();
     if (name === "ip") loadIp();
+    if (name === "place") loadPlace();
   }
   $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) nav(PATHS[b.dataset.tab]); });
   $("#home").addEventListener("click", (e) => { e.preventDefault(); nav("#/"); });
@@ -134,6 +136,33 @@
     const cv = $("#planet"), ctx = cv.getContext("2d"), tip = $("#tip");
     let W = 0, H = 0, dpr = 1, col = {}, nodes = new Map(), hover = null, mouse = null, t0 = performance.now();
     let groups = [0, 1, 2, 3].map(() => ({ n: 0, apps: "" })), maxSats = 180, animate = true, frozen = 0;
+    // rotation de la Terre : automatique, ou a la main (reprise automatique apres 30 s sans y toucher)
+    // ---- orientation de la Terre (quaternion corps -> vue) ----
+    const qmul = (a, b) => [a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]];
+    const qaxis = (x, y, z, ang) => { const s2 = Math.sin(ang / 2); return [Math.cos(ang / 2), x * s2, y * s2, z * s2]; };
+    const qnorm = (q) => { const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return q.map((v) => v / n); };
+    function qmat(q) {  // matrice corps -> vue
+      const [w, x, y, z] = q;
+      return [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+              2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+              2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+    }
+    function qslerp(a, b, t) {
+      let d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+      if (d < 0) { b = b.map((v) => -v); d = -d; }
+      if (d > 0.9995) return qnorm(a.map((v, i) => v + (b[i] - v) * t));
+      const th = Math.acos(d), s0 = Math.sin((1 - t) * th) / Math.sin(th), s1 = Math.sin(t * th) / Math.sin(th);
+      return a.map((v, i) => v * s0 + b[i] * s1);
+    }
+    const TILT = 0.41;
+    const upright = (L) => qmul(qaxis(0, 0, 1, TILT), qaxis(0, 1, 0, -L));  // axe normal, longitude L face a nous
+    let q = upright(Math.PI * 0.62), clouds = 0, lastT = 0, touched = -1e9, drag = null, lastDragMoved = false;
+    let geoPts = [], home = null, geoHover = null, G_R = 0, G_cx = 0, G_cy = 0;
+    let zoom = 1, FA = 1, pinned = null, pinnedPos = null, geoScreen = [];
+    const hitGeo = (m) => { let best = null, bd = 1e9; geoScreen.forEach((o) => { const d = Math.hypot(m.x - o.p.x, m.y - o.p.y); if (d < o.r && d < bd) { bd = d; best = o.c; } }); return best; };
+    const ZMIN = 0.6, ZMAX = 4, MAX_PX = 380000;
+    const IDLE_MS = 30000;
     const ORBITS = [
       { label: "Entrantes", sub: "Internet", speed: 0.11, c: "in" },
       { label: "Sortantes", sub: "Internet", speed: -0.07, c: "out" },
@@ -155,85 +184,96 @@
                L(L(h3(xi, yi, zi + 1, s), h3(xi + 1, yi, zi + 1, s), u), L(h3(xi, yi + 1, zi + 1, s), h3(xi + 1, yi + 1, zi + 1, s), u), v), w);
     }
     function fbm(x, y, z, s, oct) { let a = 0, amp = 0.5, f = 1; for (let i = 0; i < oct; i++) { a += amp * noise(x * f, y * f, z * f, s + i); f *= 2.03; amp *= 0.5; } return a; }
+    // carte terre/mer reelle (earth.js), adoucie pour des cotes lisses et des hauts-fonds
+    const M = window.EARTH_MASK, MW = M.w, MH = M.h, raw = atob(M.bits), MASK = new Float32Array(MW * MH);
+    for (let k = 0; k < MW * MH; k++) MASK[k] = (raw.charCodeAt(k >> 3) >> (7 - (k & 7))) & 1;
+    function blur(src, r) {
+      const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+      for (let j = 0; j < MH; j++) for (let i = 0; i < MW; i++) { let a = 0; for (let d = -r; d <= r; d++) a += src[j * MW + ((i + d + MW) % MW)]; tmp[j * MW + i] = a / (2 * r + 1); }
+      for (let j = 0; j < MH; j++) for (let i = 0; i < MW; i++) { let a = 0; for (let d = -r; d <= r; d++) a += tmp[Math.min(MH - 1, Math.max(0, j + d)) * MW + i]; out[j * MW + i] = a / (2 * r + 1); }
+      return out;
+    }
+    const COAST = blur(MASK, 1), SHELF = blur(MASK, 6);
     const ELEV = new Float32Array(TW * TH), CLOUD = new Float32Array(TW * TH), CITY = new Float32Array(TW * TH);
     for (let j = 0; j < TH; j++) {
       const lat = (0.5 - (j + 0.5) / TH) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
       for (let i = 0; i < TW; i++) {
         const lon = ((i + 0.5) / TW) * Math.PI * 2, x = cl * Math.cos(lon), y = sl, z = cl * Math.sin(lon), k = j * TW + i;
-        const wx = x + 0.35 * (fbm(x * 2, y * 2, z * 2, 91, 2) - 0.5), wz = z + 0.35 * (fbm(z * 2, x * 2, y * 2, 37, 2) - 0.5);
-        ELEV[k] = fbm(wx * 1.7 + 5, y * 1.7 + 5, wz * 1.7 + 5, 11, 5);
+        ELEV[k] = fbm(x * 2.2 + 5, y * 2.2 + 5, z * 2.2 + 5, 11, 5);
         const c = fbm(x * 3.2, y * 6.5, z * 3.2, 53, 4);
-        CLOUD[k] = Math.max(0, Math.min(1, (c - 0.52) * 3.2)) * (0.55 + 0.45 * Math.abs(sl));
-        CITY[k] = rnd(k * 1.7 + 3) > 0.92 ? rnd(k + 11) : 0;
+        CLOUD[k] = Math.max(0, Math.min(1, (c - 0.53) * 3.0)) * (0.5 + 0.5 * Math.abs(sl));
+        const mk = Math.min(MH - 1, Math.floor((j + 0.5) / TH * MH)) * MW + Math.min(MW - 1, Math.floor((i + 0.5) / TW * MW));
+        CITY[k] = MASK[mk] && Math.abs(lat) < 1.1 && rnd(k * 1.7 + 3) > 0.9 ? rnd(k + 11) : 0;
       }
     }
-    const SEA = 0.52;
     // ---- rendu de la sphere, pixel par pixel ----
     const gcv = document.createElement("canvas"), gctx = gcv.getContext("2d");
-    let G = null, img = null, lastGlobe = -1;
+    let img = null, lastGlobe = -1, lastRender = 0, lastBox = "", qAdapt = 1;
     const Lx = -0.55, Ly = 0.42, Lz = 0.72, Ln = Math.hypot(Lx, Ly, Lz), lx = Lx / Ln, ly = Ly / Ln, lz = Lz / Ln;
     const hx = lx, hy = ly, hz = lz + 1, hn = Math.hypot(hx, hy, hz), Hx = hx / hn, Hy = hy / hn, Hz = hz / hn;
-    function prepGlobe(R) {
-      const S = Math.max(64, Math.round(R * 2 * Math.min(dpr, 1.6)));
-      if (G && G.S === S) return;
-      gcv.width = gcv.height = S; img = gctx.createImageData(S, S);
-      const n = S * S, nx = new Float32Array(n), ny = new Float32Array(n), nz = new Float32Array(n), a = new Float32Array(n);
-      const r = S / 2;
-      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-        const px = (x + 0.5 - r) / r, py = (r - y - 0.5) / r, d = Math.hypot(px, py), k = y * S + x;
-        if (d > 1 + 1.5 / r) { a[k] = 0; continue; }
-        const dd = Math.min(d, 1); a[k] = Math.max(0, Math.min(1, (1 - d) * r + 0.5));
-        nx[k] = px * (dd / (d || 1)); ny[k] = py * (dd / (d || 1)); nz[k] = Math.sqrt(Math.max(0, 1 - dd * dd));
-      }
-      G = { S, nx, ny, nz, a };
-    }
-    const tilt = 0.41, ct = Math.cos(tilt), st = Math.sin(tilt);
-    function renderGlobe(rot, crot) {
-      const { S, nx, ny, nz, a } = G, d = img.data;
-      for (let k = 0, n = S * S; k < n; k++) {
-        const o = k * 4;
-        if (!a[k]) { d[o + 3] = 0; continue; }
-        const X = nx[k], Y = ny[k], Z = nz[k];
-        // inclinaison de l'axe, puis latitude / longitude
-        const Y2 = Y * ct - X * st, X2 = X * ct + Y * st;
-        const lat = Math.asin(Math.max(-1, Math.min(1, Y2))), lon = Math.atan2(X2, Z);
-        let u = (lon + rot) / (Math.PI * 2); u -= Math.floor(u);
-        let uc = (lon + crot) / (Math.PI * 2); uc -= Math.floor(uc);
-        const j = Math.min(TH - 1, Math.floor((0.5 - lat / Math.PI) * TH)), ti = j * TW + Math.floor(u * TW), tc = j * TW + Math.floor(uc * TW);
-        const fu = u * TW - 0.5, i0 = Math.floor(fu), fx = fu - i0, ia = (i0 + TW) % TW, ib = (i0 + 1) % TW;
-        const fv = Math.max(0, Math.min(TH - 1.001, (0.5 - lat / Math.PI) * TH - 0.5)), j0 = Math.floor(fv), fy = fv - j0, j1 = Math.min(TH - 1, j0 + 1);
-        const e = (ELEV[j0 * TW + ia] * (1 - fx) + ELEV[j0 * TW + ib] * fx) * (1 - fy) + (ELEV[j1 * TW + ia] * (1 - fx) + ELEV[j1 * TW + ib] * fx) * fy;
-        const diff = X * lx + Y * ly + Z * lz, day = Math.max(0, Math.min(1, diff * 1.6 + 0.12));
-        const polar = Math.abs(lat) > 1.2 + (e - 0.5) * 0.5;
-        let r, g, b;
-        const sh = Math.max(0, Math.min(1, (e - SEA + 0.12) / 0.12));
-        const or = 6 + 22 * sh, og = 26 + 58 * sh, ob = 58 + 70 * sh;
-        let lr, lg, lb;
-        const hh = Math.max(0, (e - SEA) / (1 - SEA));
-        if (hh < 0.025) { lr = 170; lg = 158; lb = 116; }
-        else if (hh < 0.3) { const q = (hh - 0.025) / 0.275; lr = 62 + 36 * q; lg = 100 + 18 * q; lb = 54 + 8 * q; }
-        else if (hh < 0.55) { const q = (hh - 0.3) / 0.25; lr = 98 + 50 * q; lg = 118 + 8 * q; lb = 62 + 22 * q; }
-        else { const q = Math.min(1, (hh - 0.55) / 0.3); lr = 148 + 80 * q; lg = 126 + 100 * q; lb = 84 + 140 * q; }
-        const land = Math.max(0, Math.min(1, (e - SEA + 0.006) / 0.012));
-        if (polar) { r = 228; g = 236; b = 244; }
-        else { r = or + (lr - or) * land; g = og + (lg - og) * land; b = ob + (lb - ob) * land; }
-        const lit = 0.06 + 0.94 * day;
-        r *= lit; g *= lit; b *= lit;
-        if (land < 1 && !polar) {
-          const sp = Math.pow(Math.max(0, X * Hx + Y * Hy + Z * Hz), 60) * 170 * (1 - land);
-          r += sp; g += sp; b += sp * 0.95;
+    function renderGlobe(m, crot, R, cx, cy, x0, y0, bw, bh, qd) {
+      if (!img || img.width !== bw || img.height !== bh) { gcv.width = bw; gcv.height = bh; img = gctx.createImageData(bw, bh); }
+      const d = img.data, edge = 1.5 / (R * qd);
+      // m est corps -> vue ; sa transposee donne vue -> corps
+      const a0 = m[0], a1 = m[3], a2 = m[6], b0 = m[1], b1 = m[4], b2 = m[7], c0 = m[2], c1 = m[5], c2 = m[8];
+      for (let j = 0; j < bh; j++) {
+        const Ys = (cy - (y0 + (j + 0.5) / qd)) / R;
+        for (let i = 0; i < bw; i++) {
+          const o = (j * bw + i) * 4, Xs = (x0 + (i + 0.5) / qd - cx) / R, r2 = Xs * Xs + Ys * Ys;
+          if (r2 > (1 + edge) * (1 + edge)) { d[o + 3] = 0; continue; }
+          const dist = Math.sqrt(r2), aa = Math.max(0, Math.min(1, (1 - dist) * R * qd + 0.5));
+          if (aa <= 0) { d[o + 3] = 0; continue; }
+          const sc = dist > 1 ? 1 / dist : 1, X = Xs * sc, Y = Ys * sc, Z = Math.sqrt(Math.max(0, 1 - X * X - Y * Y));
+          const bx = a0 * X + a1 * Y + a2 * Z, by = b0 * X + b1 * Y + b2 * Z, bz = c0 * X + c1 * Y + c2 * Z;
+          const lat = Math.asin(Math.max(-1, Math.min(1, by))), lon = Math.atan2(bx, bz);
+          let u = lon / (Math.PI * 2); u -= Math.floor(u);
+          let uc = (lon + crot) / (Math.PI * 2); uc -= Math.floor(uc);
+          const vv = 0.5 - lat / Math.PI;
+          // carte reelle, echantillonnage bilineaire
+          const fu = u * MW - 0.5, i0 = Math.floor(fu), fx = fu - i0, ia = (i0 + MW) % MW, ib = (i0 + 1) % MW;
+          const fv = Math.max(0, Math.min(MH - 1.001, vv * MH - 0.5)), j0 = Math.floor(fv), fy = fv - j0, j1 = Math.min(MH - 1, j0 + 1);
+          const land = Math.max(0, Math.min(1, ((COAST[j0 * MW + ia] * (1 - fx) + COAST[j0 * MW + ib] * fx) * (1 - fy) + (COAST[j1 * MW + ia] * (1 - fx) + COAST[j1 * MW + ib] * fx) * fy - 0.42) / 0.16));
+          const shelf = SHELF[j0 * MW + ia];
+          const tj = Math.min(TH - 1, Math.floor(vv * TH)), ti = tj * TW + Math.floor(u * TW), tc = tj * TW + Math.floor(uc * TW);
+          const e = ELEV[ti];
+          const diff = X * lx + Y * ly + Z * lz, day = Math.max(0, Math.min(1, diff * 1.6 + 0.12));
+          const ice = Math.abs(lat) > 1.2 + (e - 0.5) * 0.35 || (land > 0.5 && Math.abs(lat) > 1.08 + (e - 0.5) * 0.4);
+          let r, g, b;
+          const sh = Math.min(1, shelf * 1.6);
+          const or = 6 + 24 * sh, og = 26 + 62 * sh, ob = 58 + 72 * sh;
+          let lr, lg, lb;
+          const dry = Math.max(0, Math.min(1, 1 - Math.abs(lat - 0.4) * 2.2)) * 0.6 + Math.max(0, Math.min(1, 1 - Math.abs(lat + 0.4) * 2.2)) * 0.5;
+          const hh = Math.max(0, Math.min(1, (e - 0.35) * 2.2));
+          if (hh > 0.62) { const q = Math.min(1, (hh - 0.62) / 0.3); lr = 120 + 90 * q; lg = 112 + 100 * q; lb = 92 + 130 * q; }
+          else { lr = 58 + 100 * dry + 30 * hh; lg = 98 + 50 * dry + 18 * hh; lb = 52 + 40 * dry + 10 * hh; }
+          if (ice) { r = 226; g = 234; b = 242; }
+          else { r = or + (lr - or) * land; g = og + (lg - og) * land; b = ob + (lb - ob) * land; }
+          const lit = 0.06 + 0.94 * day;
+          r *= lit; g *= lit; b *= lit;
+          if (land < 1 && !ice) {
+            const sp = Math.pow(Math.max(0, X * Hx + Y * Hy + Z * Hz), 90) * 95 * (1 - land);
+            r += sp; g += sp; b += sp * 0.95;
+          }
+          if (day < 0.35 && land > 0.5 && CITY[ti]) {
+            const ni = (0.35 - day) / 0.35 * CITY[ti] * 230;
+            r += ni; g += ni * 0.72; b += ni * 0.35;
+          }
+          const c = CLOUD[tc];
+          if (c) { const cw = 255 * (0.08 + 0.92 * day); r += (cw - r) * c * 0.8; g += (cw - g) * c * 0.8; b += (cw - b) * c * 0.8; }
+          const rim = Math.pow(1 - Z, 2.6) * (0.25 + 0.9 * Math.max(0, diff + 0.2));
+          r += 80 * rim; g += 150 * rim; b += 255 * rim;
+          d[o] = r > 255 ? 255 : r; d[o + 1] = g > 255 ? 255 : g; d[o + 2] = b > 255 ? 255 : b; d[o + 3] = aa * 255;
         }
-        if (day < 0.35 && e >= SEA && CITY[ti]) {
-          const ni = (0.35 - day) / 0.35 * CITY[ti] * 230;
-          r += ni; g += ni * 0.72; b += ni * 0.35;
-        }
-        const c = CLOUD[tc];
-        if (c) { const cw = 255 * (0.08 + 0.92 * day); r += (cw - r) * c * 0.85; g += (cw - g) * c * 0.85; b += (cw - b) * c * 0.85; }
-        const rim = Math.pow(1 - Z, 2.6) * (0.25 + 0.9 * Math.max(0, diff + 0.2));
-        r += 80 * rim; g += 150 * rim; b += 255 * rim;
-        d[o] = r > 255 ? 255 : r; d[o + 1] = g > 255 ? 255 : g; d[o + 2] = b > 255 ? 255 : b; d[o + 3] = a[k] * 255;
       }
       gctx.putImageData(img, 0, 0);
+    }
+    // latitude/longitude reelles -> position a l'ecran (meme projection que renderGlobe)
+    let OM = qmat(q);
+    function project(latDeg, lonDeg, g) {
+      const lat = latDeg * Math.PI / 180, lb = ((lonDeg + 180) / 360) * Math.PI * 2;
+      const bx = Math.cos(lat) * Math.sin(lb), by = Math.sin(lat), bz = Math.cos(lat) * Math.cos(lb);
+      const X = OM[0] * bx + OM[1] * by + OM[2] * bz, Y = OM[3] * bx + OM[4] * by + OM[5] * bz, Z = OM[6] * bx + OM[7] * by + OM[8] * bz;
+      return { x: g.cx + X * g.R, y: g.cy - Y * g.R, z: Z };
     }
 
     function theme() {
@@ -247,9 +287,24 @@
       dpr = Math.min(2, window.devicePixelRatio || 1);
       W = r.width; H = r.height;
       cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
-      G = null;
+      lastBox = "";
     }
     const orbitOf = (n) => (n.status === "suspect" || n.status === "banned" ? 3 : n.scope === "lan" ? 2 : n.dir === "in" ? 0 : 1);
+    function setGeo(locs, h0) {
+      const cells = new Map();
+      (live && live.nodes || []).forEach((n) => {
+        const g = locs[n.ip];
+        if (!g) return;
+        const key = Math.round(g[0] * 2) / 2 + "," + Math.round(g[1] * 2) / 2;
+        let c = cells.get(key);
+        if (!c) { c = { key, lat: g[0], lon: g[1], cc: g[2], city: g[3], ips: [], conns: 0, worst: 0, k: orbitOf(n) }; cells.set(key, c); }
+        c.ips.push(n.ip); c.conns += n.conns;
+        const w = n.status === "banned" ? 3 : n.status === "suspect" ? 2 : n.status === "self" ? -1 : n.status === "bot" ? 1 : 0;
+        if (w > c.worst) { c.worst = w; c.k = orbitOf(n); }
+      });
+      geoPts = [...cells.values()];
+      home = h0 ? { lat: h0[0], lon: h0[1], city: h0[3], cc: h0[2] } : null;
+    }
     function set(list) {
       const seen = new Set(), g = [0, 1, 2, 3].map(() => ({ n: 0, apps: new Map(), banned: 0 }));
       list.forEach((n) => {
@@ -271,9 +326,9 @@
     }
     function geom() {
       const narrow = W < 700;
-      const R = narrow ? Math.min(W * 0.2, H * 0.17) : Math.min(H * 0.185, W * 0.15, 150);
+      const R = (narrow ? Math.min(W * 0.2, H * 0.17) : Math.min(H * 0.185, W * 0.15, 150)) * zoom;
       const cx = narrow ? W / 2 : W * 0.54, cy = narrow ? H * 0.52 : H * 0.47;
-      const wide = Math.min(R * 3.7, narrow ? W * 0.47 : Math.min(cx, W - cx) - 14);
+      const wide = Math.max(R * 1.6, Math.min(R * 3.7, narrow ? W * 0.47 : Math.min(cx, W - cx) - 14));
       return { narrow, R, cx, cy, o: [
         { rx: R * 1.42, ry: R * 1.42, rot: 0, flat: false, at: -0.62 },
         { rx: R * 1.98, ry: R * 1.98, rot: 0, flat: false, at: -1.42 },
@@ -291,7 +346,7 @@
       ctx.save();
       ctx.beginPath(); ctx.ellipse(g.cx, g.cy, o.rx, o.ry, o.rot, from, to);
       if (col.dark) { ctx.shadowColor = c; ctx.shadowBlur = 8; }
-      ctx.strokeStyle = c; ctx.lineWidth = k === 3 ? 1.3 : 1.1; ctx.globalAlpha = k === 3 ? 0.95 : 0.75;
+      ctx.strokeStyle = c; ctx.lineWidth = k === 3 ? 1.3 : 1.1; ctx.globalAlpha = (k === 3 ? 0.95 : 0.75) * FA;
       if (k === 2) ctx.setLineDash([2, 5]);
       ctx.stroke(); ctx.restore();
     }
@@ -303,16 +358,110 @@
       glow.addColorStop(0.35, col.dark ? "rgba(56,130,246,.16)" : "rgba(59,130,246,.10)");
       glow.addColorStop(1, "rgba(59,130,246,0)");
       ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, R * 1.32, 0, Math.PI * 2); ctx.fill();
-      prepGlobe(R);
-      const rot = t * 0.045, crot = t * 0.07;
-      if (Math.abs(rot - lastGlobe) > 0.0015 || lastGlobe < 0) { renderGlobe(rot, crot); lastGlobe = rot; }
-      ctx.drawImage(gcv, cx - R, cy - R, R * 2, R * 2);
+      const x0 = Math.max(0, Math.floor(cx - R)), y0 = Math.max(0, Math.floor(cy - R));
+      const x1 = Math.min(W, Math.ceil(cx + R)), y1 = Math.min(H, Math.ceil(cy + R));
+      if (x1 > x0 && y1 > y0) {
+        let qd = Math.min(dpr, 1.5);
+        const area = (x1 - x0) * (y1 - y0);
+        if (area * qd * qd > MAX_PX) qd = Math.sqrt(MAX_PX / area);
+        qd *= qAdapt;  // qualite adaptee a la vitesse de la machine
+        const bw = Math.max(1, Math.ceil((x1 - x0) * qd)), bh = Math.max(1, Math.ceil((y1 - y0) * qd));
+        const box = [x0, y0, x1, y1, R.toFixed(2), cx.toFixed(1), cy.toFixed(1)].join(",");
+        const key = q[0] * 1e4 + q[1] * 3e3 + q[2] * 7e3 + q[3] * 11e3 + clouds * 3e2, now = performance.now();
+        const changed = box !== lastBox || Math.abs(key - lastGlobe) > 2;
+        const every = zoom > 1.5 ? 50 : 33;  // rotation auto : 20 a 30 images/s suffisent
+        if (changed && (box !== lastBox || drag || now - lastRender > every)) {
+          renderGlobe(OM, clouds, R, cx, cy, x0, y0, bw, bh, qd);
+          const ms = performance.now() - now;
+          const budget = zoom > 1.5 ? 20 : 14;
+          if (ms > budget) qAdapt = Math.max(0.45, qAdapt * 0.9); else if (ms < budget / 2) qAdapt = Math.min(1, qAdapt * 1.04);
+          lastGlobe = key; lastBox = box; lastRender = now;
+        }
+        ctx.drawImage(gcv, 0, 0, gcv.width, gcv.height, x0, y0, bw / qd, bh / qd);
+      }
+      if (grab) {
+        grab.style.left = Math.max(0, cx - R) + "px"; grab.style.top = Math.max(0, cy - R) + "px";
+        grab.style.width = (Math.min(W, cx + R) - Math.max(0, cx - R)) + "px"; grab.style.height = (Math.min(H, cy + R) - Math.max(0, cy - R)) + "px";
+        grab.style.borderRadius = R * 2 < Math.min(W, H) ? "50%" : "0";
+      }
       // fin liseré lumineux cote soleil
       ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R + 0.5, Math.PI * 0.85, Math.PI * 1.65);
       ctx.strokeStyle = "rgba(186,230,253,.55)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
     }
+    function projectAlt(latDeg, lonDeg, g, h) {
+      const p = project(latDeg, lonDeg, g);
+      return { x: g.cx + (p.x - g.cx) * (1 + h), y: g.cy + (p.y - g.cy) * (1 + h), z: p.z };
+    }
+    const cellColor = (c) => (c.worst >= 2 ? col.sus : c.worst === -1 ? col.lan : col[ORBITS[c.k].c]);
+    function beacon(c, g, t, strength) {
+      const base = project(c.lat, c.lon, g);
+      if (base.z <= 0.02) return;
+      const top = projectAlt(c.lat, c.lon, g, Math.min(1.1, 0.8 / Math.sqrt(zoom)) + 0.15), color = cellColor(c);
+      const fade = Math.min(1, (base.z - 0.02) * 5) * strength;
+      const grad = ctx.createLinearGradient(base.x, base.y, top.x, top.y);
+      grad.addColorStop(0, color); grad.addColorStop(0.75, color); grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.save(); ctx.lineCap = "round"; ctx.strokeStyle = grad;
+      ctx.globalCompositeOperation = col.dark ? "lighter" : "source-over";
+      const flick = 0.85 + 0.15 * Math.sin(t * 7);
+      [[22, 0.10], [12, 0.2], [6, 0.5 * flick], [3, 0.95]].forEach(([w, a]) => {
+        ctx.globalAlpha = a * fade; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
+      });
+      ctx.globalAlpha = 0.95 * fade; ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 1.4;
+      const mid = { x: base.x + (top.x - base.x) * 0.7, y: base.y + (top.y - base.y) * 0.7 };
+      ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(mid.x, mid.y); ctx.stroke();
+      for (let i = 0; i < 4; i++) {  // particules qui montent dans le faisceau
+        const f = (t * 0.5 + i / 4) % 1;
+        ctx.globalAlpha = (1 - f) * 0.9 * fade; ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(base.x + (top.x - base.x) * f, base.y + (top.y - base.y) * f, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
+      const pq = (t * 0.9) % 1;
+      ctx.globalAlpha = (1 - pq) * 0.8 * fade; ctx.strokeStyle = color; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.ellipse(base.x, base.y, 4 + pq * 16, (4 + pq * 16) * Math.max(0.3, base.z), 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = fade; ctx.fillStyle = "#fff";  // socle lumineux
+      ctx.beginPath(); ctx.arc(base.x, base.y, 2.6, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    function geoLayer(g, t) {
+      geoHover = null; pinnedPos = null; geoScreen = [];
+      const pts = [];
+      geoPts.forEach((c) => {
+        const p = project(c.lat, c.lon, g);
+        if (p.z <= 0.04) return;
+        pts.push({ c, p });
+      });
+      pts.sort((a, b) => a.p.z - b.p.z);
+      pts.forEach(({ c, p }) => {
+        const col0 = cellColor(c);
+        const a = Math.min(1, (p.z - 0.04) * 4), size = 2.4 + Math.min(4, Math.log2(1 + c.conns) * 1.0);
+        ctx.globalAlpha = a;
+        ctx.shadowColor = col0; ctx.shadowBlur = 8;
+        ctx.beginPath(); ctx.arc(p.x, p.y, size, 0, Math.PI * 2); ctx.fillStyle = col0; ctx.fill();
+        ctx.shadowBlur = 0;
+        if (c.worst >= 2) {
+          const q = (Math.sin(t * 3 + c.lat) + 1) / 2;
+          ctx.globalAlpha = a * 0.5 * (1 - q); ctx.beginPath(); ctx.arc(p.x, p.y, size + 2 + q * 6, 0, Math.PI * 2); ctx.strokeStyle = col.sus; ctx.lineWidth = 1; ctx.stroke();
+        }
+        geoScreen.push({ c, p, r: size + 5 });
+        if (mouse && !drag && Math.hypot(mouse.x - p.x, mouse.y - p.y) < size + 5) geoHover = { c, p };
+        if (pinned && c.key === pinned) pinnedPos = { c, p };
+      });
+      const pc = pinned ? geoPts.find((c) => c.key === pinned) : null;
+      if (pc) beacon(pc, g, t, 1);
+      if (geoHover && geoHover.c && geoHover.c.key !== pinned) beacon(geoHover.c, g, t, 0.55);
+      if (home) {
+        const p = project(home.lat, home.lon, g);
+        if (p.z > 0.04) {
+          const q = (t * 0.8) % 1;
+          ctx.globalAlpha = Math.min(1, (p.z - 0.04) * 4);
+          ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fillStyle = "#ffffff"; ctx.fill();
+          ctx.globalAlpha *= 1 - q; ctx.beginPath(); ctx.arc(p.x, p.y, 3 + q * 12, 0, Math.PI * 2); ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.2; ctx.stroke();
+          if (mouse && !drag && Math.hypot(mouse.x - p.x, mouse.y - p.y) < 8) geoHover = { home: true, p };
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
     function sat(o, t) {
-      const st = o.d.status, base = o.alpha * (o.front ? 1 : 0.4), c = ringCol(o.k);
+      const st = o.d.status, base = o.alpha * (o.front ? 1 : 0.4) * FA, c = ringCol(o.k);
       ctx.globalAlpha = base;
       if (st === "suspect" || st === "banned") {
         const p = (Math.sin(t * 3 + o.j * 10) + 1) / 2;
@@ -331,6 +480,7 @@
     }
     function callout(g, k) {
       const p = pt(g, k, g.o[k].at), gr = groups[k], small = g.narrow, c = ringCol(k);
+      ctx.globalAlpha = FA;
       ctx.beginPath(); ctx.arc(p.x, p.y, small ? 6 : 8.5, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill();
       ctx.strokeStyle = col.bg; ctx.lineWidth = 2; ctx.stroke();
       const f = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif";
@@ -347,12 +497,25 @@
       put(num(gr.n), numF, c, y);
       put(label, labF, col.text, y + (small ? 15 : 20));
       if (!small && gr.apps) put(gr.apps, subF, col.muted, y + 37);
+      ctx.globalAlpha = 1;
     }
     function frame(now) {
       requestAnimationFrame(frame);
       if (tab !== "overview" || !W || document.hidden) return;
       if (!animate) { if (!frozen) frozen = now; } else if (frozen) { t0 += now - frozen; frozen = 0; }
       const t = ((frozen || now) - t0) / 1000, g = geom();
+      const dt = lastT ? Math.min(0.1, t - lastT) : 0; lastT = t;
+      const idle = performance.now() - touched > IDLE_MS;
+      if (idle && !drag) {
+        // tourne sur son propre axe, puis se redresse en douceur vers l'axe normal sans changer de face
+        q = qnorm(qmul(q, qaxis(0, 1, 0, dt * 0.045 / Math.sqrt(zoom))));
+        const m0 = qmat(q), L = Math.atan2(m0[6], m0[8]);  // longitude face a nous
+        q = qnorm(qslerp(q, upright(L), Math.min(1, dt * 1.2)));
+      }
+      OM = qmat(q);
+      clouds += dt * 0.02;
+      G_R = g.R; G_cx = g.cx; G_cy = g.cy;
+      FA = Math.max(0, Math.min(1, (2.2 - zoom) / 0.7));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = col.dark ? "#ffffff" : "#3f3f46";
       stars.forEach((s, i) => { ctx.globalAlpha = (col.dark ? 0.15 : 0.08) + (col.dark ? 0.65 : 0.2) * ((Math.sin(t * (0.3 + s.w) + i) + 1) / 2); ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2); ctx.fill(); });
@@ -366,22 +529,42 @@
         o.size = 2.6 + Math.min(4.2, Math.log2(1 + o.d.conns) * 1.15);
         list.push(o);
       });
-      if (mouse) {
+      if (mouse && !drag && FA > 0.3) {
         let best = null, bd = 12;
         list.forEach((o) => { const d = Math.hypot(o.x - mouse.x, o.y - mouse.y) - o.size; if (d < bd && (o.front || Math.hypot(o.x - g.cx, o.y - g.cy) > g.R)) { bd = d; best = o; } });
         hover = best;
       } else hover = null;
-      [0, 1, 2, 3].forEach((k) => orbit(g, k, 0, Math.PI * 2));
-      list.filter((o) => !o.front).forEach((o) => sat(o, t));
+      if (FA > 0.01) [0, 1, 2, 3].forEach((k) => orbit(g, k, 0, Math.PI * 2));
+      if (FA > 0.01) list.filter((o) => !o.front).forEach((o) => sat(o, t));
       globe(g, t);
-      [2, 3].forEach((k) => orbit(g, k, 0, Math.PI));
+      if (geoPts.length || home) geoLayer(g, t);
+      if (FA > 0.01) [2, 3].forEach((k) => orbit(g, k, 0, Math.PI));
       if (hover) { ctx.beginPath(); ctx.moveTo(hover.x, hover.y); ctx.lineTo(g.cx, g.cy); ctx.strokeStyle = col.text; ctx.globalAlpha = 0.35; ctx.lineWidth = 1; ctx.setLineDash([3, 4]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1; }
-      list.filter((o) => o.front).forEach((o) => sat(o, t));
-      [0, 1, 2, 3].forEach((k) => callout(g, k));
+      if (FA > 0.01) list.filter((o) => o.front).forEach((o) => sat(o, t));
+      if (FA > 0.01) [0, 1, 2, 3].forEach((k) => callout(g, k));
       showTip();
     }
     function showTip() {
-      if (!hover) { tip.hidden = true; cv.style.cursor = "default"; return; }
+      const onGlobe = mouse && Math.hypot(mouse.x - G_cx, mouse.y - G_cy) < G_R * 1.03;
+      const geoShow = !hover && !drag ? (geoHover || pinnedPos) : null;
+      if (geoShow) {
+        cv.style.cursor = geoHover ? "pointer" : onGlobe ? "grab" : "default";
+        tip.textContent = "";
+        if (geoShow.home) tip.append(h("div", null, h("b", null, "Ton serveur"), home.city ? " · " + home.city : ""));
+        else {
+          const c = geoShow.c, isPinned = c.key === pinned;
+          tip.append(h("div", null, h("b", null, [c.city, c.cc].filter(Boolean).join(", ") || "Lieu inconnu"), isPinned ? h("span", { class: "muted" }, " · épinglé") : null));
+          tip.append(h("div", null, c.ips.length + " adresse" + (c.ips.length > 1 ? "s" : "") + " · " + c.conns + " connexion" + (c.conns > 1 ? "s" : "")));
+          c.ips.slice(0, 5).forEach((ip) => tip.append(h("div", { class: "mono muted" }, ip)));
+          if (c.ips.length > 5) tip.append(h("div", { class: "muted" }, "et " + (c.ips.length - 5) + " autre(s)"));
+          tip.append(h("div", { class: "tiphint" }, (isPinned ? "" : "Clic : épingler · ") + "Double-clic : " + (c.ips.length === 1 ? "ouvrir la fiche" : "voir les adresses")));
+        }
+        tip.hidden = false;
+        tip.style.left = Math.max(8, Math.min(W - tip.offsetWidth - 8, geoShow.p.x + 12)) + "px";
+        tip.style.top = Math.max(8, Math.min(H - tip.offsetHeight - 8, geoShow.p.y + 12)) + "px";
+        return;
+      }
+      if (!hover) { tip.hidden = true; cv.style.cursor = drag ? "grabbing" : onGlobe ? "grab" : "default"; return; }
       const d = hover.d;
       cv.style.cursor = "pointer";
       tip.textContent = "";
@@ -396,13 +579,77 @@
       tip.style.left = Math.max(8, Math.min(W - tw - 8, hover.x + 14)) + "px";
       tip.style.top = Math.max(8, Math.min(H - th - 8, hover.y + 14)) + "px";
     }
-    cv.addEventListener("mousemove", (e) => { const r = cv.getBoundingClientRect(); mouse = { x: e.clientX - r.left, y: e.clientY - r.top }; });
-    cv.addEventListener("mouseleave", () => { mouse = null; });
-    cv.addEventListener("click", () => { if (hover) openIp(hover.d.ip); });
+    const card = cv.parentElement, grab = document.createElement("div");
+    grab.className = "globe-grab"; card.appendChild(grab);
+    const pos = (e) => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    card.addEventListener("pointermove", (e) => {
+      mouse = pos(e);
+      if (!drag) return;
+      const dx = mouse.x - drag.x, dy = mouse.y - drag.y;
+      drag.x = mouse.x; drag.y = mouse.y;
+      if (Math.abs(mouse.x - drag.x0) + Math.abs(mouse.y - drag.y0) > 4) drag.moved = true;
+      const k = 1 / Math.max(40, G_R);
+      // gauche-droite : autour de l'axe vertical de l'ecran ; haut-bas : autour de l'axe horizontal
+      q = qnorm(qmul(qmul(qaxis(0, 1, 0, dx * k), qaxis(1, 0, 0, dy * k)), q));
+      touched = performance.now();
+    });
+    card.addEventListener("pointerdown", (e) => {
+      const p = pos(e);
+      if (hover || Math.hypot(p.x - G_cx, p.y - G_cy) > G_R * 1.03) return;
+      drag = { x: p.x, y: p.y, x0: p.x, y0: p.y, moved: false };
+      touched = performance.now();
+      try { card.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    const end = () => {
+      if (!drag) return;
+      lastDragMoved = drag.moved; drag = null; touched = performance.now();
+    };
+    card.addEventListener("pointerup", end); card.addEventListener("pointercancel", end);
+    card.addEventListener("pointerleave", () => { if (!drag) mouse = null; });
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".zoombar")) return;
+      if (lastDragMoved) { lastDragMoved = false; return; }
+      if (hover) return openIp(hover.d.ip);
+      const c = hitGeo(pos(e));
+      if (c) { pinned = c.key; touched = performance.now(); return; }
+      pinned = null;
+    });
+    card.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".zoombar")) return;
+      const c = hitGeo(pos(e));
+      if (!c) return;
+      if (c.ips.length === 1) openIp(c.ips[0]);
+      else nav("#/lieu?lat=" + c.lat.toFixed(4) + "&lon=" + c.lon.toFixed(4));
+    });
+    // zoom : molette sur la Terre, ou curseur
+    const zb = h("div", { class: "zoombar", "aria-label": "Zoom" });
+    const zr = h("input", { type: "range", min: 0, max: 1000, step: 1, "aria-label": "Niveau de zoom" });
+    const zIn = h("button", { type: "button", title: "Zoomer", "aria-label": "Zoomer" }, "+");
+    const zOut = h("button", { type: "button", title: "Dézoomer", "aria-label": "Dézoomer" }, "−");
+    const zLab = h("button", { type: "button", class: "zl", title: "Revenir à 1×" }, "1×");
+    zb.append(zIn, zr, zOut, zLab); card.appendChild(zb);
+    const toSlider = (z) => Math.round(Math.log(z / ZMIN) / Math.log(ZMAX / ZMIN) * 1000);
+    function setZoom(z) {
+      zoom = Math.max(ZMIN, Math.min(ZMAX, z));
+      zr.value = toSlider(zoom); zLab.textContent = (zoom < 1.95 ? zoom.toFixed(1) : Math.round(zoom * 10) / 10) + "×";
+      try { localStorage.setItem("orbite-zoom", String(zoom)); } catch (err) {}
+    }
+    zr.addEventListener("input", () => setZoom(ZMIN * Math.pow(ZMAX / ZMIN, zr.value / 1000)));
+    zIn.addEventListener("click", () => setZoom(zoom * 1.25));
+    zOut.addEventListener("click", () => setZoom(zoom / 1.25));
+    zLab.addEventListener("click", () => setZoom(1));
+    card.addEventListener("wheel", (e) => {
+      const m = pos(e), over = Math.hypot(m.x - G_cx, m.y - G_cy) < G_R * 1.1;
+      if (!over && zoom <= 1.001) return;  // ailleurs dans la carte, la page defile normalement
+      e.preventDefault();
+      setZoom(zoom * Math.exp(-Math.max(-120, Math.min(120, e.deltaY)) * 0.0018));
+    }, { passive: false });
+    let z0 = 1; try { z0 = parseFloat(localStorage.getItem("orbite-zoom")) || 1; } catch (err) {}
+    setZoom(z0);
     window.addEventListener("resize", resize);
     if (window.ResizeObserver) new ResizeObserver(resize).observe(cv.parentElement);
     theme(); requestAnimationFrame(frame);
-    return { set, resize, theme, setMax: (n) => { maxSats = n; }, setAnimate: (v) => { animate = v; } };
+    return { set, setGeo, resize, theme, setMax: (n) => { maxSats = n; }, setAnimate: (v) => { animate = v; } };
   })();
 
   // ---------- graphiques ----------
@@ -496,7 +743,7 @@
   // ---------- vue d'ensemble ----------
   function hud(st) {
     const el = $("#hud"); el.textContent = "";
-    el.append(h("div", { class: "who" }, h("b", null, host || "Le serveur"), " a"),
+    el.append(h("div", { class: "who" }, h("b", null, host || "Le serveur")),
       h("div", { class: "big" }, num(st.active)),
       h("div", { class: "what" }, "connexion" + (st.active > 1 ? "s" : "") + " en orbite"),
       h("div", { class: "asof" }, "(" + num(st.ips) + " client" + (st.ips > 1 ? "s" : "") + " · " + new Date().toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" }) + ")"));
@@ -509,8 +756,8 @@
     try {
       live = await api("/api/live");
       $("#pulse").className = "pulse " + (Date.now() / 1000 - live.ts < 30 ? "live" : "down");
-      hud(live.stats); planet.set(live.nodes);
-      const b = $("#badge-alerts"); b.hidden = !live.stats.flags24h; b.textContent = live.stats.flags24h;
+      hud(live.stats); planet.set(live.nodes); planet.setGeo(live.geo || {}, live.home);
+      const b = $("#badge-alerts"); b.hidden = !live.stats.unseen; b.textContent = live.stats.unseen;
       const box = $("#top-apps"); box.textContent = "";
       const max = Math.max(1, ...live.apps.map((a) => a.conns));
       if (!live.apps.length) box.append(h("div", { class: "empty" }, "Aucune connexion active pour l'instant."));
@@ -521,9 +768,10 @@
   }
   async function loadRecent() {
     try {
-      const d = await api("/api/flags?min=2&limit=7");
+      const d = await api("/api/flags?min=2&limit=7&unseen=1");
       const box = $("#recent-alerts"); box.textContent = "";
-      if (!d.rows.length) box.append(h("div", { class: "empty" }, "Rien de suspect pour l'instant."));
+      $("#seen-recent").hidden = !d.rows.length;
+      if (!d.rows.length) box.append(h("div", { class: "empty" }, "Aucune nouvelle alerte."));
       d.rows.forEach((f) => box.append(h("div", { class: "item link", on: { click: () => openIp(f.ip) } },
         h("i", { class: "dot " + (f.banned ? "banned" : f.severity === "high" ? "banned" : "suspect") }),
         h("div", { class: "t" }, f.kind, h("small", null, f.ip + " · " + f.detail)), h("small", null, when(f.last_ts)))));
@@ -586,13 +834,28 @@
       const d = await api("/api/flags?" + new URLSearchParams({ min: $("#a-min").value, q: $("#a-q").value.trim(), limit: 300 }));
       const tb = $("#t-flags tbody"); tb.textContent = "";
       d.rows.forEach((f) => tb.append(h("tr", null,
-        h("td", null, when(f.last_ts)), h("td", null, h("span", { class: "pill " + f.severity }, SEV_LABEL[f.severity])),
+        h("td", null, when(f.last_ts), f.seen ? null : h("span", { class: "newtag" }, "nouvelle")), h("td", null, h("span", { class: "pill " + f.severity }, SEV_LABEL[f.severity])),
         ipCell(f.ip, f.banned ? "bannie par fail2ban" : f.host), h("td", null, f.kind),
         detailCell(f), h("td", { class: "num" }, f.count),
         h("td", null, h("button", { class: "btn small", title: "Effacer toutes les alertes de cette adresse", on: { click: async () => { await act("/api/unflag", { ip: f.ip }); loadFlags(); loadLive(); loadRecent(); } } }, "Effacer")))));
       if (!d.rows.length) tb.append(h("tr", null, h("td", { colspan: 7, class: "empty" }, "Aucune alerte.")));
     } catch (e) {}
   }
+  async function markSeen() { await act("/api/flags/seen", {}); loadFlags(); loadRecent(); loadLive(); }
+  $("#seen-recent").addEventListener("click", markSeen);
+  $("#seen-all").addEventListener("click", markSeen);
+  (function () {
+    const btn = $("#clear-all"); let armed = null;
+    btn.addEventListener("click", async () => {
+      if (!armed) {
+        btn.textContent = "Confirmer : tout effacer"; btn.classList.add("danger");
+        armed = setTimeout(() => { armed = null; btn.textContent = "Tout effacer"; btn.classList.remove("danger"); }, 4000);
+        return;
+      }
+      clearTimeout(armed); armed = null; btn.textContent = "Tout effacer"; btn.classList.remove("danger");
+      await act("/api/flags/clear", {}); loadFlags(); loadRecent(); loadLive();
+    });
+  })();
   $("#a-min").addEventListener("change", loadFlags);
   $("#a-q").addEventListener("input", debounce(loadFlags, 300));
 
@@ -680,6 +943,37 @@
       box.append(h("div", { class: "links" }, a("AbuseIPDB", "https://www.abuseipdb.com/check/" + e), a("Shodan", "https://www.shodan.io/host/" + e),
         a("VirusTotal", "https://www.virustotal.com/gui/ip-address/" + e), a("GreyNoise", "https://viz.greynoise.io/ip/" + e)));
     }
+  }
+  let currentPlace = { lat: "", lon: "" };
+  async function loadPlace() {
+    const box = $("#tab-place"), want = currentPlace;
+    box.textContent = ""; box.append(h("div", { class: "empty" }, "Chargement…"));
+    let d;
+    try { d = await api("/api/place?lat=" + encodeURIComponent(want.lat) + "&lon=" + encodeURIComponent(want.lon)); } catch (e) { return; }
+    if (currentPlace !== want || tab !== "place") return;
+    box.textContent = "";
+    const back = h("button", { class: "btn", on: { click: () => (history.length > 1 ? history.back() : nav("#/")) } }, "← Retour");
+    if (d.error) { box.append(h("div", { class: "bar" }, h("div", { class: "ipbar" }, back)), h("div", { class: "notice" }, d.error)); return; }
+    const name = [d.city, d.cc].filter(Boolean).join(", ") || "Lieu inconnu";
+    const live = d.ips.reduce((a, r) => a + (r.active || 0), 0), sus = d.ips.filter((r) => r.status === "suspect" || r.status === "banned").length;
+    box.append(h("div", { class: "bar" }, h("div", { class: "ipbar" }, back, h("h2", null, name),
+      h("span", { class: "muted mono" }, d.lat.toFixed(1) + "°, " + d.lon.toFixed(1) + "°"))));
+    box.append(h("div", { class: "grid stats" },
+      h("div", { class: "card stat" }, h("span", { class: "k" }, "Adresses"), h("span", { class: "v" }, num(d.ips.length))),
+      h("div", { class: "card stat" }, h("span", { class: "k" }, "Connexions en cours"), h("span", { class: "v" }, num(live))),
+      h("div", { class: "card stat" }, h("span", { class: "k" }, "Suspectes ou bannies"), h("span", { class: "v" + (sus ? " hot" : "") }, num(sus)))));
+    const rows = d.ips.map((r) => h("tr", { class: "link", on: { click: () => openIp(r.ip) } },
+      h("td", null, h("a", { href: "#/ip/" + encodeURIComponent(r.ip), class: "mono" }, r.ip), r.host ? h("div", { class: "muted small" }, r.host) : null),
+      h("td", null, h("span", { class: "pill " + pillOf(r.status) }, STATUS_LABEL[r.status] || r.status)),
+      h("td", null, r.city || "—"),
+      h("td", { class: "num" }, num(r.active || 0)),
+      h("td", { class: "num" }, num(r.total || 0) + (r.total ? " (" + num(r.n_in || 0) + " ↓ / " + num(r.n_out || 0) + " ↑)" : "")),
+      h("td", null, r.apps.join(", ") || "—"),
+      h("td", { class: "num" }, r.flags ? num(r.flags) : "—"),
+      h("td", null, r.last ? when(r.last) : "—")));
+    box.append(tableCard("Adresses à cet endroit", [["Adresse"], ["État"], ["Ville"], ["En cours", "num"], ["Connexions", "num"], ["Applications"], ["Alertes", "num"], ["Dernière fois"]],
+      rows, "Aucune adresse enregistrée à cet endroit."));
+    box.append(h("p", { class: "muted small", style: "margin-top:10px" }, "Positions approximatives (ville ou fournisseur) : les adresses sont regroupées par case d'environ 50 km."));
   }
   async function loadIp() {
     const box = $("#tab-ip"), ip = currentIp;
@@ -959,6 +1253,7 @@
       toggle("log_lan", "Enregistrer le réseau local", "Connexions entre le serveur et tes appareils"),
       toggle("rdns", "Résoudre les noms (DNS inverse)", "Affiche le nom d'hôte des adresses"),
       toggle("lookup", "Renseignements externes sur les IP", "Envoie l'adresse consultée à rdap.org et ip-api.com"),
+      toggle("geo_points", "Points des adresses sur la Terre", "Envoie les adresses connectées à ip-api.com (par lots, gardées 30 jours). Nécessite l'option précédente"),
       toggle("enforce_f2b", "Blocage complet des IP fail2ban", "Coupe aussi leurs connexions aux conteneurs")));
 
     const foot = $("#ps-foot"); foot.textContent = "";
